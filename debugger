@@ -1,0 +1,9 @@
+kubectl -n secflow-ns exec deploy/secflow-app-dataflow-vuln-scan-worker -- python3 -c "
+import pymysql, json
+c=pymysql.connect(host='mysql.sothothv2-ns.svc.cluster.local',user='secflow',password='Huawei12#\$',database='secflow',charset='utf8mb4')
+cur=c.cursor()
+cur.execute(\"SELECT task_id,status,output_path,error,latest_abnormal_reason_json FROM secflow_app_dvs_tasks WHERE status IN('failed','error') ORDER BY started_at DESC LIMIT 15\")
+for tid,st,op,err,reason in cur.fetchall():
+	print('---'); print('task_id:',tid); print('status:',st); print('output_path:',op)
+	print('error:',(err or '')[:300]); print('abnormal:',(reason or '')[:400])
+"

@@ -7,3 +7,50 @@ for tid,st,op,err,reason in cur.fetchall():
 	print('---'); print('task_id:',tid); print('status:',st); print('output_path:',op)
 	print('error:',(err or '')[:300]); print('abnormal:',(reason or '')[:400])
 "
+
+第 1 步：捞出你那边 script_validation_failed 的任务
+
+ completed_limited 不在 failed/error 里，得查 events 表：
+
+ ```bash
+kubectl -n secflow-ns exec deploy/secflow-app-dataflow-vuln-scan-worker -- python3 -c "
+import pymysql
+c=pymysql.connect(host='mysql.sothothv2-ns.svc.cluster.local',user='secflow',password='Huawei12#\$',database='secflow',charset='utf8mb4')
+cur=c.cursor()
+cur.execute(\"SELECT task_id,function_name,substr(payload_json,1,260) FROM secflow_app_dvs_task_events WHERE event_type='task_completed_limited' AND payload_json LIKE '%script_validation_failed%' ORDER BY id DESC LIMIT 20\")
+for tid,fn,pl in cur.fetchall():
+	print(tid, '|', fn)
+	print('---')
+cur.execute(\"SELECT task_id,output_path FROM secflow_app_dvs_tasks WHERE task_id IN (SELECT task_id FROM secflow_app_dvs_task_events WHERE event_type='task_completed_limited' AND payload_json LIKE '%script_validation_failed%')\")
+for tid,op in cur.fetchall():
+	print(tid, op)
+"
+ ```
+
+ 把输出贴给我（task_id + output_path + 出错函数名）。
+
+ 第 2 步（拿到 task_id 后）：一键 dump 根因
+
+ 把 <TASK_ID> 和 <OUTPUT_PATH> 替换后跑。这条同时给出 df_issues（区分两类根因）+ LLM 原始输出末尾（看
+ JSON 为什么提不出来）：
+
+ ```bash
+kubectl -n secflow-ns exec deploy/secflow-app-dataflow-vuln-scan-worker -- sh -c '
+T=<TASK_ID>; R=<OUTPUT_PATH>/$T
+echo "=== result.json 根因 ==="
+cat $R/run/result.json 2>/dev/null | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+print(\"status:\",d.get(\"status\"),\"| reason:\",d.get(\"completion_reason\"),\"| error:\",d.get(\"error\"))
+for r in d.get(\"rounds\",[]):
+	wr=(r.get(\"worker_results\") or [{}])[0]
+print(\"round\",r.get(\"round\"),r.get(\"function_name\"),\"status=\"+str(r.get(\"status\")),\"reason=\"+str(r.get(\"completion_reason\")))
+print(\"  df_issues:\",wr.get(\"df_issues\"))
+print(\"  dataflow_file:\",wr.get(\"dataflow_file\"))
+"
+echo "=== 最新 epoch 的 worker session 末尾 (LLM 原始输出) ==="
+SF=$(ls -t $R/run/epochs/*/sessions/*-worker.jsonl 2>/dev/null | head -1)
+echo "session: $SF"
+tail -c 3000 "$SF" 2>/dev/null
+'
+ ```
